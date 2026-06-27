@@ -390,6 +390,10 @@ MonoBehaviour:
   maxTokens: 60
   temperature: 0.9
   timeoutSeconds: 8
+  enableTts: 1
+  ttsModel: playai-tts
+  ttsVoice: Fritz-PlayAI
+  audioSource: {fileID: 0}
 --- !u!114 &1728394653
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -440,7 +444,8 @@ MonoBehaviour:
       type: 1
       accuracy: 35
     currentHP: 0
-  messageDelay: 1.1
+  messageDelay: 1.6
+  speechReadTime: 3
   speechMaxWait: 8
   groq: {fileID: 1728394652}
   ui: {fileID: 0}

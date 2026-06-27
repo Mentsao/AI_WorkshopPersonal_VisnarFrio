@@ -17,6 +17,7 @@ namespace PokeBattle
     public class GroqClient : MonoBehaviour
     {
         private const string Endpoint = "https://api.groq.com/openai/v1/chat/completions";
+        private const string TtsEndpoint = "https://api.groq.com/openai/v1/audio/speech";
 
         [Header("Groq API")]
         [SerializeField] private string apiKey = "";
@@ -28,32 +29,59 @@ namespace PokeBattle
         [Tooltip("Abort the request after this many seconds and use a canned line instead.")]
         [SerializeField] private float timeoutSeconds = 8f;
 
+        [Header("Text-to-Speech (Groq PlayAI)")]
+        [Tooltip("If off (or no API key), lines are shown silently with no audio.")]
+        [SerializeField] private bool enableTts = true;
+        [SerializeField] private string ttsModel = "playai-tts";
+        [Tooltip("PlayAI voice, e.g. Fritz-PlayAI, Celeste-PlayAI, Thunder-PlayAI, Atlas-PlayAI.")]
+        [SerializeField] private string ttsVoice = "Fritz-PlayAI";
+        [Tooltip("Optional: assign an AudioSource. One is added automatically if left empty.")]
+        [SerializeField] private AudioSource audioSource;
+
         public bool HasApiKey => !string.IsNullOrWhiteSpace(apiKey);
+        public bool TtsEnabled => enableTts && HasApiKey;
+
+        private void Awake()
+        {
+            if (audioSource == null)
+            {
+                audioSource = GetComponent<AudioSource>();
+                if (audioSource == null) audioSource = gameObject.AddComponent<AudioSource>();
+            }
+            audioSource.playOnAwake = false;
+        }
 
         /// <summary>
         /// Generates a short spoken line for a creature and delivers it via callback.
         /// Never throws and never blocks: on any failure it returns a canned line.
         /// </summary>
-        public void Speak(string creatureName, ElementType type, string situation, Action<string> onResult)
+        public void Speak(string speakerName, ElementType type, string opponentName, string situation, string lastOpponentLine, Action<string> onResult)
         {
-            StartCoroutine(SpeakRoutine(creatureName, type, situation, onResult));
+            StartCoroutine(SpeakRoutine(speakerName, type, opponentName, situation, lastOpponentLine, onResult));
         }
 
-        private IEnumerator SpeakRoutine(string creatureName, ElementType type, string situation, Action<string> onResult)
+        private IEnumerator SpeakRoutine(string speakerName, ElementType type, string opponentName, string situation, string lastOpponentLine, Action<string> onResult)
         {
             if (!HasApiKey)
             {
-                onResult?.Invoke(Fallback(creatureName, situation));
+                onResult?.Invoke(Fallback(speakerName, situation));
                 yield break;
             }
 
             string systemPrompt =
-                "You voice a creature in a Pokemon-style battle. " +
-                "Reply with ONE short in-character line (max 12 words). " +
-                "No quotes, no emojis, no narration. Be punchy and fun.";
+                "Ikaw ang boses ng isang nilalang sa isang Pokemon-style na laban. " +
+                "Mang-aaway ka at mang-iinsulto sa kalaban para masaktan ang damdamin nito (trash talk). " +
+                "Sumagot ka ng ISANG maikling linya LANG sa Filipino o Taglish (hanggang 12 salita). " +
+                "Maging savage, mayabang, at nakakatusok pero PLAYFUL — walang mura, slur, o tunay na pang-aapi. " +
+                "Banggitin ang pangalan ng kalaban kung kaya. Walang quotes, walang emoji, walang paliwanag.";
+
+            string opponentContext = string.IsNullOrWhiteSpace(lastOpponentLine)
+                ? "Wala pang sinabi ang kalaban."
+                : $"Sinabi ng kalaban: \"{lastOpponentLine}\". Sagutin/gantihan mo siya.";
 
             string userPrompt =
-                $"Creature: {creatureName} (type: {type}). Situation: {situation}. Say your line.";
+                $"Ikaw si {speakerName} (uri: {type}). Kalaban mo si {opponentName}. " +
+                $"Sitwasyon: {situation}. {opponentContext} Sabihin ang iyong panunukso.";
 
             var request = new ChatRequest
             {
@@ -83,12 +111,81 @@ namespace PokeBattle
                 if (www.result != UnityWebRequest.Result.Success)
                 {
                     Debug.LogWarning($"[GroqClient] Request failed ({www.responseCode}): {www.error}. Using fallback line.");
-                    onResult?.Invoke(Fallback(creatureName, situation));
+                    onResult?.Invoke(Fallback(speakerName, situation));
                     yield break;
                 }
 
                 string line = ParseLine(www.downloadHandler.text);
-                onResult?.Invoke(string.IsNullOrWhiteSpace(line) ? Fallback(creatureName, situation) : line);
+                onResult?.Invoke(string.IsNullOrWhiteSpace(line) ? Fallback(speakerName, situation) : line);
+            }
+        }
+
+        /// <summary>
+        /// Synthesizes the given text with Groq's PlayAI TTS endpoint and plays it.
+        /// Calls onComplete when playback finishes (or immediately if TTS is off/fails),
+        /// so callers can keep the speech bubble up while the line is spoken.
+        /// </summary>
+        public void PlaySpeech(string text, Action onComplete)
+        {
+            StartCoroutine(PlaySpeechRoutine(text, onComplete));
+        }
+
+        private IEnumerator PlaySpeechRoutine(string text, Action onComplete)
+        {
+            if (!TtsEnabled || string.IsNullOrWhiteSpace(text))
+            {
+                onComplete?.Invoke();
+                yield break;
+            }
+
+            var request = new TtsRequest
+            {
+                model = ttsModel,
+                input = text,
+                voice = ttsVoice,
+                response_format = "wav"
+            };
+
+            string json = JsonUtility.ToJson(request);
+            byte[] body = Encoding.UTF8.GetBytes(json);
+
+            using (UnityWebRequest www = new UnityWebRequest(TtsEndpoint, "POST"))
+            {
+                www.uploadHandler = new UploadHandlerRaw(body);
+                var audioHandler = new DownloadHandlerAudioClip(TtsEndpoint, AudioType.WAV);
+                audioHandler.streamAudio = false;
+                www.downloadHandler = audioHandler;
+                www.timeout = Mathf.CeilToInt(timeoutSeconds);
+                www.SetRequestHeader("Content-Type", "application/json");
+                www.SetRequestHeader("Authorization", "Bearer " + apiKey);
+
+                yield return www.SendWebRequest();
+
+                if (www.result != UnityWebRequest.Result.Success)
+                {
+                    Debug.LogWarning($"[GroqClient] TTS failed ({www.responseCode}): {www.error}.");
+                    onComplete?.Invoke();
+                    yield break;
+                }
+
+                AudioClip clip = null;
+                try { clip = audioHandler.audioClip; }
+                catch (Exception e) { Debug.LogWarning("[GroqClient] Could not decode TTS audio: " + e.Message); }
+
+                if (clip == null)
+                {
+                    onComplete?.Invoke();
+                    yield break;
+                }
+
+                audioSource.Stop();
+                audioSource.clip = clip;
+                audioSource.Play();
+
+                while (audioSource.isPlaying)
+                    yield return null;
+
+                onComplete?.Invoke();
             }
         }
 
@@ -124,14 +221,14 @@ namespace PokeBattle
         {
             string[] lines =
             {
-                "Let's do this!",
-                "You can't beat me!",
-                "Is that all you've got?",
-                "I'm just getting warmed up!",
-                "Feel my power!",
-                "Nice try!",
-                "Too slow!",
-                "Bring it on!"
+                "Ang hina mo naman, nakakahiya!",
+                "Umuwi ka na, talo ka na dito!",
+                "Yan lang? Natutulog pa ako, oy!",
+                "Iyak ka na, wala kang kalaban-laban!",
+                "Mukha mo, takbo na habang maaga!",
+                "Sayang ang oras ko sa pitsugin na parang ikaw!",
+                "Ang bagal mo, parang kuhol ka lang!",
+                "Tapos ka na bago pa magsimula, lampa!"
             };
             return lines[UnityEngine.Random.Range(0, lines.Length)];
         }
@@ -164,6 +261,15 @@ namespace PokeBattle
         private class Choice
         {
             public ChatMessage message;
+        }
+
+        [Serializable]
+        private class TtsRequest
+        {
+            public string model;
+            public string input;
+            public string voice;
+            public string response_format;
         }
     }
 }

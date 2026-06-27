@@ -17,7 +17,11 @@ namespace PokeBattle
         [SerializeField] private List<Creature> enemyParty = new List<Creature>();
 
         [Header("Pacing")]
-        [SerializeField] private float messageDelay = 1.1f;
+        [Tooltip("Pause after each battle-log line.")]
+        [SerializeField] private float messageDelay = 1.6f;
+        [Tooltip("Minimum time a speech bubble stays on screen so it's readable.")]
+        [SerializeField] private float speechReadTime = 3f;
+        [Tooltip("Safety cap for how long to wait on a Groq text/voice response.")]
         [SerializeField] private float speechMaxWait = 8f;
 
         [Header("References (auto-found if left empty)")]
@@ -31,6 +35,7 @@ namespace PokeBattle
         private Creature EnemyActive => enemyParty[_enemyActive];
 
         private int _pendingPlayerMove = -1;
+        private string _lastSpokenLine = "";
 
         private void Awake()
         {
@@ -117,6 +122,7 @@ namespace PokeBattle
             if (attacker.IsFainted) yield break;
 
             ui.AppendLog($"{attacker.name} used {move.name}!");
+            yield return new WaitForSeconds(messageDelay * 0.5f);
 
             bool hit = Random.Range(0, 100) < move.accuracy;
             if (!hit)
@@ -186,10 +192,11 @@ namespace PokeBattle
         /// <summary>Generates and displays a spoken line, waiting (briefly) for Groq.</summary>
         private IEnumerator Speak(Creature speaker, bool isPlayer, string situation)
         {
+            Creature opponent = isPlayer ? EnemyActive : PlayerActive;
             ui.ShowSpeech(speaker.name, "...", isPlayer);
 
             string result = null;
-            groq.Speak(speaker.name, speaker.type, situation, line => result = line);
+            groq.Speak(speaker.name, speaker.type, opponent.name, situation, _lastSpokenLine, line => result = line);
 
             float elapsed = 0f;
             while (result == null && elapsed < speechMaxWait)
@@ -199,10 +206,26 @@ namespace PokeBattle
             }
 
             if (result == null) result = "...";
+            _lastSpokenLine = result;
             ui.ShowSpeech(speaker.name, result, isPlayer);
             ui.AppendLog($"{speaker.name}: \"{result}\"");
-            yield return new WaitForSeconds(messageDelay * 0.6f);
+
+            // Voice the line and keep the bubble up until BOTH the audio has
+            // finished AND it has been visible long enough to comfortably read.
+            bool spoken = false;
+            groq.PlaySpeech(result, () => spoken = true);
+
+            float minShow = speechReadTime + ReadingBonus(result);
+            float maxShow = speechMaxWait + minShow + 6f;
+            float shown = 0f;
+            while ((!spoken || shown < minShow) && shown < maxShow)
+            {
+                shown += Time.deltaTime;
+                yield return null;
+            }
+
             ui.HideSpeech();
+            yield return new WaitForSeconds(messageDelay * 0.3f);
         }
 
         // ---------- Helpers ----------
@@ -213,6 +236,14 @@ namespace PokeBattle
             float spread = Random.Range(0.85f, 1.0f);
             int dmg = Mathf.RoundToInt(move.power * multiplier * spread * 0.5f);
             return Mathf.Max(1, dmg);
+        }
+
+        /// <summary>Extra on-screen time for longer lines (~3 words per second).</summary>
+        private static float ReadingBonus(string line)
+        {
+            if (string.IsNullOrEmpty(line)) return 0f;
+            int words = line.Split(' ').Length;
+            return Mathf.Clamp(words / 3f, 0f, 4f);
         }
 
         private bool BattleOver()
